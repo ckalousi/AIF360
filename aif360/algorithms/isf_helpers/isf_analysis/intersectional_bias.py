@@ -18,55 +18,13 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
+import matplotlib.colors as mcolors
 import seaborn as sns
 
-from aif360.algorithms.isf_helpers.isf_metrics.disparate_impact import DisparateImpact
 from aif360.algorithms.isf_helpers.isf_utils.common import create_multi_group_label
 
 
-def calc_intersectionalbias(dataset, metric="DisparateImpact"):
-    """
-    Calculate intersectional bias(DisparateImpact) by more than one sensitive attributes
-
-    Parameters
-    ----------
-    dataset : StructuredDataset
-        A dataset containing more than one sensitive attributes
-
-    metric : str
-        Fairness metric name
-        ["DisparateImpact"]
-
-    Returns
-    -------
-    df_result : DataFrame
-        Intersectional bias(DisparateImpact)
-    """
-
-    df = dataset.convert_to_dataframe()[0]
-    label_info = {dataset.label_names[0]: dataset.favorable_label}
-
-    if metric == "DisparateImpact":
-        fs = DisparateImpact()
-    else:
-        raise ValueError("metric name not in the list of allowed metrics")
-
-    df_result = pd.DataFrame(columns=[metric])
-    for multi_group_label in create_multi_group_label(dataset)[0]:
-        protected_attr_info = multi_group_label[0]
-        di = fs.bias_predict(df,
-                             protected_attr_info=protected_attr_info,
-                             label_info=label_info)
-        name = ''
-        for k, v in protected_attr_info.items():
-            name += k + " = " + str(v) + ","
-        df_result.loc[name[:-1]] = di
-
-    return df_result
-
-
-def plot_intersectionalbias_compare(ds_bef, ds_aft, vmax=1, vmin=0, center=0,
-                                    metric="DisparateImpact",
+def plot_intersectionalbias_compare(df_bef, df_aft, vmax=0.8, vmin=0.2, center=0,
                                     title={"right": "before", "left": "after"},
                                     filename=None):
     """
@@ -88,9 +46,6 @@ def plot_intersectionalbias_compare(ds_bef, ds_aft, vmax=1, vmin=0, center=0,
         Graph title (right figure, left figure)
     """
 
-    df_bef = calc_intersectionalbias_matrix(ds_bef, metric)
-    df_aft = calc_intersectionalbias_matrix(ds_aft, metric)
-
     gs = GridSpec(1, 2)
     ss1 = gs.new_subplotspec((0, 0))
     ss2 = gs.new_subplotspec((0, 1))
@@ -98,64 +53,16 @@ def plot_intersectionalbias_compare(ds_bef, ds_aft, vmax=1, vmin=0, center=0,
     ax1 = plt.subplot(ss1)
     ax2 = plt.subplot(ss2)
 
+    max_val = df_bef.values.max()
+    cmap = mcolors.LinearSegmentedColormap.from_list("red_to_green", ["red", "green"])
+    norm = mcolors.Normalize(vmin=vmin, vmax=vmax, clip=True)
+
     ax1.set_title(title['right'])
-    sns.heatmap(df_bef, ax=ax1, vmax=vmax, vmin=vmin, center=center, annot=True, cmap='hot')
+    sns.heatmap(df_bef, ax=ax1, vmax=max_val, vmin=vmin, center=center, annot=True, cmap=cmap, norm=norm)
 
     ax2.set_title(title['left'])
-    sns.heatmap(df_aft, ax=ax2, vmax=vmax, vmin=vmin, center=center, annot=True, cmap='hot')
+    sns.heatmap(df_aft, ax=ax2, vmax=max_val, vmin=vmin, center=center, annot=True, cmap=cmap, norm=norm)
 
     if filename is not None:
         plt.savefig(filename, format="png", dpi=300)
     plt.show()
-
-
-def calc_intersectionalbias_matrix(dataset, metric="DisparateImpact"):
-    """
-    Comparison drawing of intersectional bias in heat map
-
-    Parameters
-    ----------
-    dataset : StructuredDataset
-        Dataset containing two sensitive attributes
-    metric : str
-        Fairness metric name
-        ["DisparateImpact"]
-
-    Returns
-    -------
-    df_result : DataFrame
-        Intersectional bias(DisparateImpact)
-    """
-
-    protect_attr = dataset.protected_attribute_names
-
-    if len(protect_attr) != 2:
-        raise ValueError("specify 2 sensitive attributes.")
-
-    if metric == "DisparateImpact":
-        fs = DisparateImpact()
-    else:
-        raise ValueError("metric name not in the list of allowed metrics")
-
-    df = dataset.convert_to_dataframe()[0]
-    label_info = {dataset.label_names[0]: dataset.favorable_label}
-
-    protect_attr0_values = list(set(df[protect_attr[0]]))
-    protect_attr1_values = list(set(df[protect_attr[1]]))
-
-    df_result = pd.DataFrame(columns=protect_attr1_values)
-
-    for val0 in protect_attr0_values:
-        tmp_li = []
-        col_list = []
-        for val1 in protect_attr1_values:
-            di = fs.bias_predict(df,
-                                 protected_attr_info={protect_attr[0]: val0, protect_attr[1]: val1},
-                                 label_info=label_info)
-            tmp_li += [di]
-            col_list += [protect_attr[1]+"="+str(val1)]
-
-        df_result.loc[protect_attr[0]+"="+str(val0)] = tmp_li
-    df_result = df_result.set_axis(col_list, axis=1)
-
-    return df_result

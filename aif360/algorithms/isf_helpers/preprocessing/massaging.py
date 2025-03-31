@@ -49,8 +49,7 @@ class Massaging(PreProcessing):
         ds_train : Dataset
             Training dataset
         """
-        scale_orig = StandardScaler()
-        X = scale_orig.fit_transform(ds_train.features)
+        X = ds_train.features
         y = ds_train.labels.ravel()
         i = ds_train.protected_attribute_names.index(self.protected_attribute_name)
         s = ds_train.protected_attributes[:, i]

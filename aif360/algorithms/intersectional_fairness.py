@@ -35,9 +35,7 @@ from aif360.algorithms.isf_helpers.postprocessing.postprocessing import PostProc
 from aif360.algorithms.isf_helpers.preprocessing.massaging import Massaging
 from aif360.algorithms.isf_helpers.inprocessing.adversarial_debiasing import AdversarialDebiasing
 from aif360.algorithms.isf_helpers.postprocessing.reject_option_based_classification import RejectOptionClassification
-from aif360.algorithms.isf_helpers.postprocessing.equalized_odds_postprocessing import EqualizedOddsPostProcessing
 
-from logging import getLogger, StreamHandler, ERROR, Formatter
 from tqdm import tqdm
 
 class IntersectionalFairness():
@@ -51,7 +49,7 @@ class IntersectionalFairness():
     ----------
     algorithm : str
         Bias mitigation technique
-        {'AdversarialDebiasing', 'RejectOptionClassification', 'Massaging', 'EqualizedOddsPostProcessing'}
+        {'AdversarialDebiasing', 'RejectOptionClassification', 'Massaging'}
 
     metric : str
         Fairness metrics
@@ -101,7 +99,15 @@ class IntersectionalFairness():
         self.options = options
         self.options['metric'] = metric
         self.options['threshold'] = 0
-        algo = globals()[self.algorithm](options)
+        ALGORITHMS = {
+            'Massaging': Massaging,
+            'AdversarialDebiasing': AdversarialDebiasing,
+            'RejectOptionClassification': RejectOptionClassification,
+        }
+        if self.algorithm not in ALGORITHMS:
+            raise ValueError(f"Invalid algorithm: {self.algorithm}. Please specify 'Massaging', 'AdversarialDebiasing', or 'RejectOptionClassification'.")
+        else:
+            algo = ALGORITHMS.get(self.algorithm)(options)
         if isinstance(algo, PreProcessing):
             self.approach_type = 'PreProcessing'
         elif isinstance(algo, InProcessing):
@@ -132,7 +138,6 @@ class IntersectionalFairness():
         self.dataset_predicted = None
         self.enable_fit = None
         self.MAX_WORKERS = max_workers
-        self.dfst_all = None
         self.scores = None  # Score of all instances for debugging
 
         self.accuracy_metric = accuracy_metric
@@ -140,12 +145,6 @@ class IntersectionalFairness():
         allowed_accuracy_metrics = ['Balanced Accuracy', 'F1']
         if accuracy_metric not in allowed_accuracy_metrics:
             raise ValueError('accuracy metric name not in the list of allowed metrics')
-
-        self.logger = getLogger(__name__)
-        handler = StreamHandler()
-        handler.setFormatter(Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-        self.logger.addHandler(handler)
-        self.logger.setLevel(ERROR)
 
     def fit(self, dataset_actual, dataset_predicted=None, dataset_valid=None, options={}):
         """
@@ -166,8 +165,6 @@ class IntersectionalFairness():
             Refer to the API of the specified algorithm for details.
         """
 
-        self.logger.debug('fitting...')
-
         if dataset_valid is None:
             if self.approach_type == 'PostProcessing':
                 dataset_valid = dataset_predicted.copy(deepcopy=True)
@@ -187,8 +184,7 @@ class IntersectionalFairness():
             stat_table.extend(self._create_stat_table(dataset_actual, dataset_valid, ds_tmp, uf_t, self.metric, p_attrs))
             del ds_tmp
         protected_attribute_names = list(g[0].keys())
-        dfst = pd.DataFrame(stat_table, columns=protected_attribute_names + ['uf_t', 'P', 'N', 'P^', 'N^', 'TP', 'TN', 'FP', 'FN', 'tpr', 'tnr', 'bl_acc', 'precision', 'f1', 'sel_rate', 'difference', 'ratio'])
-        self.dfst_all = dfst
+        dfst = pd.DataFrame(stat_table, columns=protected_attribute_names + ['uf_t', 'bl_acc', 'f1', 'difference', 'ratio'])
 
         # For each group, select the uf_t with the highest accuracy rate within the range of the disparity upper limit
         df_result = pd.DataFrame()
@@ -204,7 +200,6 @@ class IntersectionalFairness():
             if self.instruct_debiasing is True:
                 # Get fairness index value range (upper_limit_disparity_a, upper_limit_disparity_b)
                 upper_limit_disparity_a, upper_limit_disparity_b = self._get_upper_limit_disparity(g)
-                self.logger.debug("group_protected_attrs={0} upper_limit_disparity_a={1} upper_limit_disparity_b={2}".format(g[0], upper_limit_disparity_a, upper_limit_disparity_b))
                 if upper_limit_disparity_a is None and upper_limit_disparity_b is None:
                     continue
 
@@ -217,12 +212,10 @@ class IntersectionalFairness():
                     # break if there is data that satisfies the index
                     dfst_each_group_fair = dfst_each_group[(dfst_each_group[self.upper_limit_disparity_type] >= uld_tmp_a) & (dfst_each_group[self.upper_limit_disparity_type] <= uld_tmp_b)]
                     if len(dfst_each_group_fair) > 0:
-                        self.logger.debug("Satisfied fairness constraint in the range of uld_tmp_a = {0:.2f}, uld_tmp_b = {1:.2f}".format(uld_tmp_a, uld_tmp_b))
                         break
 
                 # skip when dfst_each_group_fair is empty
                 if len(dfst_each_group_fair) == 0:
-                    self.logger.debug('Not satisfy fairness constraint: ' + str(g))
                     continue
 
             # The bias mitigation evenly.
@@ -234,7 +227,6 @@ class IntersectionalFairness():
                     # Set the threshold closest to base_rate within the disparity upper limit
                     dfst_each_group_fair = dfst_each_group[dfst_each_group[self.upper_limit_disparity_type].abs() <= uld_tmp]
                     if len(dfst_each_group_fair) > 0:  # If it is not within the disparity upper limit, extract the threshold that satisfies the most fairness => widen the disparity
-                        self.logger.debug('Satisfied fairness constraint in the range of uld(upper limit disparity) = ' + str(uld_tmp))
                         break
                     if uld_tmp > 1:
                         break
@@ -248,7 +240,6 @@ class IntersectionalFairness():
             dfst_each_group = dfst_each_group[dfst_each_group[self.upper_limit_disparity_type].abs() == dfst_each_group[self.upper_limit_disparity_type].abs().min()]
             dfst_each_group = dfst_each_group[dfst_each_group['uf_t'] == dfst_each_group['uf_t'].max()]
             if len(dfst_each_group) == 0:
-                self.logger.info('Not satisfy fairness constraint: ' + str(g))
                 exit(1)
             if len(df_result) == 0:
                 df_result = dfst_each_group
@@ -256,12 +247,10 @@ class IntersectionalFairness():
                 df_result = pd.concat([df_result, dfst_each_group])
 
         # df_result.to_csv(self.TO.out_dir + '/valid_result_stat.csv')
-        self.logger.debug('done.')
         self.df_result = df_result
+        return self
 
     def _worker(self, ids):
-        self.logger.debug('running isf worker for each subgroup pair:' + str(ids))
-
         group1_idx = ids[0]
         group2_idx = ids[1]
         # Determine privileged/non-privileged group (necessary for some algorithms)
@@ -309,8 +298,6 @@ class IntersectionalFairness():
         else:
             ds_mitig_valid_pair = self.models[pair_key].predict(ds_valid_pair)
 
-        self._print_pair_metric(ds_act_pair, ds_valid_pair, ds_mitig_valid_pair, self.metric, pair_name, pname, uname)
-
         # Returns a single key of protected attributes
         ds_train_protected_attributes = self._split_integration_key(ds_mitig_valid_pair,
                                                                     self.dataset_valid,
@@ -320,8 +307,6 @@ class IntersectionalFairness():
         return ds_train_protected_attributes, self.models[pair_key], pair_key
 
     def _mitigate_each_pair(self, dataset_actual, enable_fit=False, dataset_predicted=None, dataset_valid=None, options={}):
-
-        self.logger.debug('_mitigate_each_pair()')
 
         self.dataset_actual = dataset_actual.copy(deepcopy=True)
         self.enable_fit = enable_fit
@@ -377,27 +362,19 @@ class IntersectionalFairness():
 
         # Stores fav confidence (voting rate) for each instance
         fav_voting_rate_dict = {}  # key:instance_name, value:fav_confidence
-        score_type = 3  # 1:only score, 2:avg(vote*score), 3:avg(vote)*w + avg(score)*(1-w)
         score_list = []
         for i, n in enumerate(dataset_valid.instance_names):
             c_vote = cl.Counter(instance_vote_dict[n])
             voting_rate = c_vote[fav_label] / len(instance_vote_dict[n])  # Not necessarily label={0,1}
             confidence = 1
             if scores_enable is True:
-                if score_type == 1:
-                    confidence = sum(instance_conf_dict[n]) / len(instance_conf_dict[n])
-                elif score_type == 2:
-                    confidence = np.array(instance_vote_dict[n]) * np.array(instance_conf_dict[n])
-                    confidence = sum(confidence) / len(instance_vote_dict[n])
-                elif score_type == 3:
-                    voting_w = 0.75
-                    length = len(instance_vote_dict[n])
-                    voting_rate = sum(instance_vote_dict[n]) / length
-                    voting_score = voting_rate * voting_w
-                    prediction_score = (sum(instance_conf_dict[n]) / length) * (1 - voting_w)
-                    confidence = voting_score + prediction_score
-
-                    score_list.append([voting_score, prediction_score, confidence])
+                voting_w = 0.75
+                length = len(instance_vote_dict[n])
+                voting_rate = sum(instance_vote_dict[n]) / length
+                voting_score = voting_rate * voting_w
+                prediction_score = (sum(instance_conf_dict[n]) / length) * (1 - voting_w)
+                confidence = voting_score + prediction_score
+                score_list.append([voting_score, prediction_score, confidence])
 
             fav_voting_rate_dict[n] = confidence
 
@@ -421,8 +398,6 @@ class IntersectionalFairness():
             Predicted dataset
         """
 
-        self.logger.debug('transforming...')
-
         # Rewrite the corrected dataset using the threshold
         dataset_cp = dataset.copy(deepcopy=True)
 
@@ -438,10 +413,8 @@ class IntersectionalFairness():
                 continue
 
             uf_t = param['uf_t'].values[0]
-            self.logger.debug('apply score threshold: ' + str(uf_t) + 'subgroup ' + str(g))
             dataset_cp = self._change_labels_above_threshold(dataset_cp, fav_voting_rate_values, uf_t, protected_attributes=g)
 
-        self.logger.debug('done.')
         return dataset_cp
 
     def predict(self, dataset):
@@ -465,16 +438,13 @@ class IntersectionalFairness():
 
         protected_attribute_values = list(protected_attributes[0].values())
 
-        try:
-            pa00 = np.all(ds_target.protected_attributes == protected_attribute_values, axis=1)
-            more_uf_t = fav_voting_rate_values > uf_t
-            lower_uf_t = fav_voting_rate_values <= uf_t
-            fav_instances_idx = np.logical_and(pa00, more_uf_t.ravel())
-            ufav_instances_idx = np.logical_and(pa00, lower_uf_t.ravel())
-            ds_target.labels[fav_instances_idx] = ds_target.favorable_label
-            ds_target.labels[ufav_instances_idx] = ds_target.unfavorable_label
-        except ValueError:
-            exit()
+        pa00 = np.all(ds_target.protected_attributes == protected_attribute_values, axis=1)
+        more_uf_t = fav_voting_rate_values > uf_t
+        lower_uf_t = fav_voting_rate_values <= uf_t
+        fav_instances_idx = np.logical_and(pa00, more_uf_t.ravel())
+        ufav_instances_idx = np.logical_and(pa00, lower_uf_t.ravel())
+        ds_target.labels[fav_instances_idx] = ds_target.favorable_label
+        ds_target.labels[ufav_instances_idx] = ds_target.unfavorable_label
 
         return ds_target
 
@@ -536,70 +506,12 @@ class IntersectionalFairness():
             f1 = -1 if precision == -1 or TPR == -1 or (TPR + precision) == 0 else 2 * TPR * precision / (TPR + precision)
 
             metrics = [uf_t,
-                       m_sg_mitig.num_positives(privileged=True),
-                       m_sg_mitig.num_negatives(privileged=True),
-                       m_sg_mitig.num_pred_positives(privileged=True),
-                       m_sg_mitig.num_pred_negatives(privileged=True),
-                       m_sg_mitig.num_true_positives(privileged=True),
-                       m_sg_mitig.num_true_negatives(privileged=True),
-                       m_sg_mitig.num_false_positives(privileged=True),
-                       m_sg_mitig.num_false_negatives(privileged=True),
-                       TPR,
-                       TNR,
                        bal_acc,
-                       precision,
                        f1,
-                       m_sg_mitig.selection_rate(privileged=True),
                        difference,
                        ratio]
             stat_table.append(protected_attribute_values + metrics)
         return stat_table
-
-    def _print_pair_metric(self, ds_act_pair, ds_target_pair, ds_mitig_target_pair, metric, pair_name, pname, uname):
-        r = []
-        for i, n in enumerate(ds_target_pair.instance_names):
-            if n == ds_mitig_target_pair.instance_names[i]:
-                pa1 = ds_mitig_target_pair.protected_attributes[i][0]
-                r.append([n, pa1, ds_target_pair.scores[i], ds_target_pair.labels[i], ds_mitig_target_pair.labels[i]])
-            else:
-                self.logger.error('Not match name.')
-                exit(1)
-
-        target_metric = ClassificationMetric(ds_act_pair, ds_target_pair,
-                                             unprivileged_groups=[{'ikey': 0}],
-                                             privileged_groups=[{'ikey': 1}])
-        try:
-            ds_act_pair_cp = ds_act_pair.copy(deepcopy=True)
-            ds_act_pair_cp.labels = ds_mitig_target_pair.labels
-            mitig_metric = ClassificationMetric(ds_act_pair, ds_act_pair_cp,
-                                                unprivileged_groups=[{'ikey': 0}],
-                                                privileged_groups=[{'ikey': 1}])
-            mlist = [pname, uname,
-                     target_metric.selection_rate(privileged=True),
-                     target_metric.selection_rate(privileged=False),
-                     mitig_metric.selection_rate(privileged=True),
-                     mitig_metric.selection_rate(privileged=False),
-                     target_metric.true_positive_rate(privileged=True),
-                     target_metric.true_positive_rate(privileged=False),
-                     mitig_metric.true_positive_rate(privileged=True),
-                     mitig_metric.true_positive_rate(privileged=False),
-                     0.5 * (target_metric.true_positive_rate(privileged=True) + target_metric.false_positive_rate(privileged=True)),
-                     0.5 * (target_metric.true_positive_rate(privileged=False) + target_metric.false_positive_rate(privileged=False)),
-                     0.5 * (mitig_metric.true_positive_rate(privileged=True) + mitig_metric.false_positive_rate(privileged=True)),
-                     0.5 * (mitig_metric.true_positive_rate(privileged=False) + mitig_metric.false_positive_rate(privileged=False)),
-                     0.5 * (target_metric.true_positive_rate(privileged=True) + target_metric.true_negative_rate(privileged=True)),
-                     0.5 * (target_metric.true_positive_rate(privileged=False) + target_metric.true_negative_rate(privileged=True)),
-                     0.5 * (mitig_metric.true_positive_rate(privileged=True) + mitig_metric.true_negative_rate(privileged=False)),
-                     0.5 * (mitig_metric.true_positive_rate(privileged=False) + mitig_metric.true_negative_rate(privileged=False))]
-            self.pair_metric_list.append(mlist)
-        except Exception:
-            v_act = vars(ds_act_pair)
-            with open(self.TO.out_dir + '/ds_act_pair.txt', 'w') as f:
-                self.logger.error(v_act, file=f)
-            v_mitig_target = vars(ds_mitig_target_pair)
-            with open(self.TO.out_dir + '/ds_mitig_target_pair.txt', 'w') as f:
-                self.logger.error(v_mitig_target, file=f)
-            self.logger.error(traceback.format_exc())
 
     def _get_attribute_vals(self, dataset, attributes=[]):
         """
@@ -630,37 +542,6 @@ class IntersectionalFairness():
                         attributes_vals.append(float(item[key2]))
                         break
         return tuple(attributes_vals)
-
-    def _get_attribute_keys(self, dataset, attributes=[]):
-        """
-        Return the key of sensitive attribute
-
-        Parameters
-        ----------
-        dataset : StructuredDataset
-            Dataset containing sensitive attribute
-        attributes : list, optional
-            sensitive attribute
-        Returns
-        ----------
-        attributes_keys: tuple
-            key of the sensitive attribute
-        """
-
-        if dataset is None:
-            raise ValueError("Input DataSet in NoneType.")
-
-        if not isinstance(dataset, StructuredDataset):
-            raise ValueError("Input DataSet not StructuredDataset.")
-
-        attributes_keys = []
-        for index, key1 in enumerate(dataset.protected_attribute_names):
-            for item in attributes:
-                for key2 in item.keys():
-                    if key1 == key2:
-                        attributes_keys.append(np.array([float(item[key2])]))
-                        break
-        return attributes_keys
 
     def _split_group(self, dataset, unprivileged_protected_attributes=[], privileged_protected_attributes=[]):
         """
@@ -721,9 +602,6 @@ class IntersectionalFairness():
                     disable_df = sdf
                 else:
                     disable_df = pd.concat([disable_df, sdf])
-
-        unprivileged_protected_attributes_keys = self._get_attribute_keys(dataset, unprivileged_protected_attributes)
-        privileged_protected_attributes_keys = self._get_attribute_keys(dataset, privileged_protected_attributes)
 
         # Convert privileged and non-privileged group dataframes (Pandas) to datasets
         enable_ds = BinaryLabelDataset(

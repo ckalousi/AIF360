@@ -87,35 +87,3 @@ class AdversarialDebiasing(InProcessing):
         sess.close()
         tf.compat.v1.reset_default_graph()
         return ds_predict
-
-    def bias_predict(self, ds_train):
-        """
-        Model learning and prediction using AdversarialDebiasing of AIF360 without debias.
-
-        Parameters
-        ----------
-        ds_train : Dataset
-            Dataset for training and prediction
-
-        Returns
-        -------
-        ds_predict : numpy.ndarray
-            Predicted label
-        """
-        ikey = ds_train.protected_attribute_names[0]
-        priv_g = [{ikey: ds_train.privileged_protected_attributes[0]}]
-        upriv_g = [{ikey: ds_train.unprivileged_protected_attributes[0]}]
-        sess = tf.compat.v1.Session()
-        model = AD(
-            privileged_groups=priv_g,
-            unprivileged_groups=upriv_g,
-            scope_name='plain_classifier',
-            debias=False,
-            sess=sess,
-            num_epochs=self.options['num_epochs'],
-            batch_size=self.options['batch_size'])
-        model.fit(ds_train)
-        ds_predict = model.predict(ds_train)
-        sess.close()
-        tf.compat.v1.reset_default_graph()
-        return ds_predict

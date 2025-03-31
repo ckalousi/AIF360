@@ -78,19 +78,6 @@ class TestStringMethods(unittest.TestCase):
     def __init__(self, methodName='runTest'):
         super().__init__(methodName=methodName)
 
-    def _read_modelanswer(self, s_result_singleattr, s_result_combattr):
-        # load of model answer
-        ma_singleattr_bias = pd.read_csv(MODEL_ANSWER_PATH + s_result_singleattr, index_col=0)
-        ma_combattr_bias = pd.read_csv(MODEL_ANSWER_PATH + s_result_combattr, index_col=0)
-        return ma_singleattr_bias, ma_combattr_bias
-
-    def _comp_dataframe(self, df1, df2):
-        try:
-            assert_frame_equal(df1, df2)
-        except AssertionError:
-            return False
-        return True
-
     def _pickup_result(self, df_singleattr, df_combattr):
         # load of model answer
         result_singleattr_bias = df_singleattr[['group', 'base_rate', 'selection_rate', 'Balanced_Accuracy']]
@@ -144,45 +131,6 @@ class TestStringMethods(unittest.TestCase):
         assert_frame_equal(result_singleattr_bias, ma_singleattr_bias, atol=0.2)
         assert_frame_equal(result_combattr_bias, ma_combattr_bias, atol=0.2)
 
-    def test02_EqualizedOdds(self):
-        s_algorithm = 'EqualizedOddsPostProcessing'
-        s_metrics = 'EqualizedOdds'
-
-        # test
-        ds_train_classified, threshold, _ = classify(self.ds_train, self.ds_train)
-        ds_test_classified, _, _ = classify(self.ds_train, self.ds_test, threshold=threshold)
-
-        ID = IntersectionalFairness(s_algorithm, s_metrics)
-        ID.fit(self.ds_train, dataset_predicted=ds_train_classified, options={'threshold': threshold})
-        ds_predicted = ID.predict(ds_test_classified)
-
-        group_protected_attrs, label_unique_nums = create_multi_group_label(self.dataset)
-        g_metrics, sg_metrics = output_subgroup_metrics(self.ds_test, ds_predicted, group_protected_attrs)
-
-        # pickup
-        result_singleattr_bias, result_combattr_bias = self._pickup_result(g_metrics, sg_metrics)
-
-        # expected values
-        ma_singleattr_bias = pd.DataFrame(
-            [['total', 0.5783783783783784, 0.572972972972973, 0.5852504193625689],
-             ['sex:0.0', 0.5512820512820513, 0.5512820512820513, 0.5853820598006645],
-             ['sex:1.0', 0.7241379310344828, 0.6896551724137931, 0.5446428571428572],
-             ['race:0.0', 0.5785123966942148, 0.5619834710743802, 0.5959383753501402],
-             ['race:1.0', 0.578125, 0.59375, 0.565065065065065]],
-            columns=['group', 'base_rate', 'selection_rate', 'Balanced_Accuracy'])
-
-        ma_combattr_bias = pd.DataFrame(
-            [['total', 0.5783783783783784, 0.572972972972973, 0.5852504193625689],
-             ['sex:0.0_race:0.0', 0.5462962962962963, 0.5370370370370371, 0.599273607748184],
-             ['sex:0.0_race:1.0', 0.5625, 0.5833333333333334, 0.5529100529100529],
-             ['sex:1.0_race:0.0', 0.8461538461538461, 0.7692307692307693, 0.3636363636363636],
-             ['sex:1.0_race:1.0', 0.625, 0.625, 0.6]],
-            columns=['group', 'base_rate', 'selection_rate', 'Balanced_Accuracy'])
-        
-        #assert
-        assert_frame_equal(result_singleattr_bias, ma_singleattr_bias, atol=0.2)
-        assert_frame_equal(result_combattr_bias, ma_combattr_bias, atol=0.2)
-            
     def test03_Massaging(self):
         s_algorithm = 'Massaging'
         s_metrics = 'DemographicParity'

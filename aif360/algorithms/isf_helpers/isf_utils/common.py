@@ -416,19 +416,7 @@ def create_multi_group_label(dataset):
         labels = df[dataset.protected_attribute_names[0]].unique()
         labelss.append(labels)
         combinataion_label_shape.append(len(labels))
-    if len(dataset.protected_attribute_names) == 1:
-        label_list = list(itertools.product(labelss[0]))
-    elif len(dataset.protected_attribute_names) == 2:
-        label_list = list(itertools.product(labelss[0], labelss[1]))
-    elif len(dataset.protected_attribute_names) == 3:
-        label_list = list(itertools.product(labelss[0], labelss[1], labelss[2]))
-    elif len(dataset.protected_attribute_names) == 4:
-        label_list = list(itertools.product(labelss[0], labelss[1], labelss[2], labelss[3]))
-    elif len(dataset.protected_attribute_names) == 5:
-        label_list = list(itertools.product(labelss[0], labelss[1], labelss[2], labelss[3], labelss[4]))
-    else:
-        raise ValueError(
-            "Up to 5 protected_attribute_names can be set.")
+    label_list = list(itertools.product(*labelss))
 
     combinataion_label = []
     for i1 in range(len(label_list)):
