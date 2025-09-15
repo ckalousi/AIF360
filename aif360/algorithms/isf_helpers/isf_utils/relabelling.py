@@ -32,7 +32,7 @@ from sklearn.base import BaseEstimator, TransformerMixin, MetaEstimatorMixin
 from sklearn.utils.validation import check_array, check_X_y, check_is_fitted
 from sklearn.linear_model import LogisticRegression
 
-from aif360.algorithms.isf_helpers.preprocessing.checks import check_binary
+from aif360.algorithms.isf_helpers.isf_utils.checks import check_binary
 from aif360.algorithms.isf_helpers.isf_utils.common import get_baseline
 
 

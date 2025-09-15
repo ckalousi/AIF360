@@ -18,27 +18,25 @@ import numpy as np
 import pandas as pd
 import math
 import collections as cl
-import traceback
 import concurrent.futures
+from sklearn.linear_model import LogisticRegression
 
 from aif360.datasets import StructuredDataset
 from aif360.datasets import BinaryLabelDataset
 from aif360.metrics import BinaryLabelDatasetMetric
 from aif360.metrics import ClassificationMetric
+from aif360.algorithms import Transformer
+from aif360.algorithms.inprocessing.adversarial_debiasing import AdversarialDebiasing
+import tensorflow as tf
+tf.compat.v1.disable_eager_execution()
+from aif360.algorithms.postprocessing.reject_option_classification import RejectOptionClassification
 
-from aif360.algorithms.isf_helpers.isf_utils import const
 from aif360.algorithms.isf_helpers.isf_utils.common import create_multi_group_label
-from aif360.algorithms.isf_helpers.preprocessing.preprocessing import PreProcessing
-from aif360.algorithms.isf_helpers.inprocessing.inprocessing import InProcessing
-from aif360.algorithms.isf_helpers.postprocessing.postprocessing import PostProcessing
-
-from aif360.algorithms.isf_helpers.preprocessing.massaging import Massaging
-from aif360.algorithms.isf_helpers.inprocessing.adversarial_debiasing import AdversarialDebiasing
-from aif360.algorithms.isf_helpers.postprocessing.reject_option_based_classification import RejectOptionClassification
+from aif360.algorithms.isf_helpers.isf_utils.relabelling import Relabeller
 
 from tqdm import tqdm
 
-class IntersectionalFairness():
+class IntersectionalFairness(Transformer):
     """
     Mitigate intersectional-bias caused by combining multiple sensitive attributes.  Apply bias mitigation techniques to subgroups divided by sensitive attributes, and prioritize those with high mitigation effects in fairness metrics. [1]_
 
@@ -95,25 +93,27 @@ class IntersectionalFairness():
     def __init__(self, algorithm, metric, accuracy_metric='Balanced Accuracy', upper_limit_disparity=0.03,
                  debiasing_conditions=None, instruct_debiasing=False,
                  upper_limit_disparity_type='difference', max_workers=4, options={}):
+        super().__init__()
         self.algorithm = algorithm
         self.options = options
         self.options['metric'] = metric
         self.options['threshold'] = 0
-        ALGORITHMS = {
-            'Massaging': Massaging,
-            'AdversarialDebiasing': AdversarialDebiasing,
-            'RejectOptionClassification': RejectOptionClassification,
-        }
+        ALGORITHMS = ['Massaging', 'AdversarialDebiasing', 'RejectOptionClassification']
         if self.algorithm not in ALGORITHMS:
             raise ValueError(f"Invalid algorithm: {self.algorithm}. Please specify 'Massaging', 'AdversarialDebiasing', or 'RejectOptionClassification'.")
-        else:
-            algo = ALGORITHMS.get(self.algorithm)(options)
-        if isinstance(algo, PreProcessing):
+
+        if self.algorithm == 'Massaging':
             self.approach_type = 'PreProcessing'
-        elif isinstance(algo, InProcessing):
+        elif self.algorithm == 'AdversarialDebiasing':
             self.approach_type = 'InProcessing'
-        elif isinstance(algo, PostProcessing):
+        elif self.algorithm == 'RejectOptionClassification':
             self.approach_type = 'PostProcessing'
+            if metric == 'DemographicParity':
+                self.metric_for_ROC = 'Statistical parity difference'
+            elif metric == 'EqualOpportunity':
+                self.metric_for_ROC = 'Equal opportunity difference'
+            else:
+                self.metric_for_ROC = 'Average odds difference'
         self.metric = metric
         self.instruct_debiasing = instruct_debiasing
 
@@ -283,19 +283,55 @@ class IntersectionalFairness():
 
         pair_key = (group1_idx, group2_idx)
 
+        # for fitting
         if self.enable_fit is True:
-            self.options['metric'] = self.metric
-            self.models[pair_key] = globals()[self.algorithm](options=self.options)
-            if isinstance(self.models[pair_key], PostProcessing):
+            integrated_key = ds_act_pair.protected_attribute_names[0]
+            privileged_groups = [{integrated_key: ds_act_pair.privileged_protected_attributes[0]}]
+            unprivileged_groups = [{integrated_key: ds_act_pair.unprivileged_protected_attributes[0]}]
+            if self.algorithm == 'Massaging':
+                X = ds_act_pair.features
+                y = ds_act_pair.labels.ravel()
+                i = ds_act_pair.protected_attribute_names.index(ds_act_pair.protected_attribute_names[0])
+                s = ds_act_pair.protected_attributes[:, i]
+                model = Relabeller(ranker=LogisticRegression())
+                model.fit(X, y, s)
+            elif self.algorithm == 'AdversarialDebiasing':
+                graph = tf.Graph()
+                with graph.as_default():
+                    sess = tf.compat.v1.Session(graph=graph)
+                    scope_name = "deb_" + "_".join(map(str, pair_key)) if isinstance(pair_key, (tuple, list)) else f"deb_{pair_key}"
+                    model = AdversarialDebiasing(
+                                                privileged_groups=privileged_groups,
+                                                unprivileged_groups=unprivileged_groups,
+                                                scope_name=scope_name,
+                                                debias=True,
+                                                sess=sess
+                                            )
+                    model.fit(ds_act_pair)
+            elif self.algorithm == 'RejectOptionClassification':
+                model = RejectOptionClassification(
+                                            privileged_groups=privileged_groups,
+                                            unprivileged_groups=unprivileged_groups,
+                                            low_class_thresh=0.01, high_class_thresh=0.99,
+                                            num_class_thresh=100, num_ROC_margin=50,
+                                            metric_name=self.metric_for_ROC,
+                                            metric_ub=0.05, metric_lb=-0.05)
                 ds_predicted_pair, _, _ = self._select_protected_attributes(self.dataset_predicted,
                                                                             unprivileged_protected_attributes,
                                                                             privileged_protected_attributes)
-                self.models[pair_key].fit(ds_act_pair, ds_predicted_pair)
-            else:
-                self.models[pair_key].fit(ds_act_pair)
-        if isinstance(self.models[pair_key], PreProcessing):
-            ds_mitig_valid_pair = self.models[pair_key].transform(ds_valid_pair)
-        else:
+                model.fit(ds_act_pair, ds_predicted_pair)
+            self.models[pair_key] = model
+
+        # for transforming or predicting
+        if self.algorithm == 'Massaging':
+            ds_mitig_valid_pair = ds_act_pair.copy(deepcopy=True)
+            X = ds_act_pair.features
+            Y = self.models[pair_key].transform(X)
+            ds_mitig_valid_pair.scores = self.models[pair_key].ranks_.reshape(-1, 1)
+            ds_mitig_valid_pair.labels = np.array(Y).reshape(-1, 1)
+        elif self.algorithm == 'AdversarialDebiasing':
+            ds_mitig_valid_pair = self.models[pair_key].predict(ds_valid_pair)
+        elif self.algorithm == 'RejectOptionClassification':
             ds_mitig_valid_pair = self.models[pair_key].predict(ds_valid_pair)
 
         # Returns a single key of protected attributes
@@ -331,9 +367,12 @@ class IntersectionalFairness():
             for group2_idx in range(group1_idx + 1, len(self.group_protected_attrs)):
                 id_touples.append((group1_idx, group2_idx, enable_fit))
 
-        with concurrent.futures.ProcessPoolExecutor(max_workers=self.MAX_WORKERS) as executor:
+        Executor = (concurrent.futures.ThreadPoolExecutor
+            if self.algorithm == "AdversarialDebiasing" else
+            concurrent.futures.ProcessPoolExecutor)
+        with Executor(max_workers=self.MAX_WORKERS) as executor:
             futures = [executor.submit(self._worker, id_tuple) for id_tuple in id_touples]
-            for future in tqdm(concurrent.futures.as_completed(futures), total=len(id_touples)):
+            for future in concurrent.futures.as_completed(futures):
                 r = future.result()
                 ds_pair_transf_list.append(r[0])
                 self.models[r[2]] = r[1]
@@ -458,7 +497,8 @@ class IntersectionalFairness():
             m_sg_mitig = ClassificationMetric(dataset_act, dataset_target_tmp, privileged_groups=g)
             difference = None
             ratio = None
-            if metric in const.DEMOGRAPHIC_PARITY:
+
+            if metric == 'DemographicParity':
                 difference = m_sg_mitig.selection_rate(privileged=True) - m_oa.selection_rate()
 
                 if self.instruct_debiasing is True:
@@ -471,14 +511,15 @@ class IntersectionalFairness():
                         ratio = 1 - min(m_oa.selection_rate() / m_sg_mitig.selection_rate(privileged=True),
                                         m_sg_mitig.selection_rate(privileged=True) / m_oa.selection_rate())
 
-            elif metric in const.EQUAL_OPPORTUNITY:
+            elif metric == 'EqualOpportunity':
                 difference = m_sg_mitig.true_positive_rate(privileged=True) - m_oa.true_positive_rate()
                 if m_oa.true_positive_rate() == 0 or m_sg_mitig.true_positive_rate(privileged=True) == 0:
                     ratio = 1
                 else:
                     ratio = 1 - min(m_oa.true_positive_rate() / m_sg_mitig.true_positive_rate(privileged=True),
                                     m_sg_mitig.true_positive_rate(privileged=True) / m_oa.true_positive_rate())
-            elif metric in const.EQUALIZED_ODDS:
+
+            elif metric == 'EqualizedOdds':
                 m_cl_TPR = m_oa.true_positive_rate()
                 m_cl_FPR = m_oa.false_positive_rate()
                 m_TPR = m_sg_mitig.true_positive_rate(privileged=True)
@@ -488,7 +529,8 @@ class IntersectionalFairness():
                     ratio = 1
                 else:
                     ratio = 1 - min((m_cl_TPR + m_cl_FPR) / (m_TPR + m_FPR), (m_TPR + m_FPR) / (m_cl_TPR + m_cl_FPR))
-            elif metric in const.F1_PARITY:
+
+            elif metric == 'F1Parity':
                 m_cl_precision = m_oa.precision()
                 m_cl_recall = m_oa.recall()
                 m_cl_f1 = 2 * m_cl_precision * m_cl_recall / (m_cl_precision + m_cl_recall)
